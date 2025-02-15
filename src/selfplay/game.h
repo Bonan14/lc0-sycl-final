@@ -31,7 +31,7 @@
 #include "chess/position.h"
 #include "chess/uciloop.h"
 #include "neural/cache.h"
-#include "neural/backend.h"
+#include "neural/network.h"
 #include "search/classic/search.h"
 #include "search/classic/stoppers/stoppers.h"
 #include "trainingdata/trainingdata.h"
@@ -49,14 +49,16 @@ struct SelfPlayLimits {
 
 struct PlayerOptions {
   using OpeningCallback = std::function<void(const Opening&)>;
-  // Backend to use by the player.
-  Backend* backend;
+  // Network to use by the player.
+  Network* network;
   // Callback when player moves.
   CallbackUciResponder::BestMoveCallback best_move_callback;
   // Callback when player outputs info.
   CallbackUciResponder::ThinkingCallback info_callback;
   // Callback when player discards a selected move due to low visits.
   OpeningCallback discarded_callback;
+  // NNcache to use.
+  NNCache* cache;
   // User options dictionary.
   const OptionsDict* uci_options;
   // Limits to use for every move.

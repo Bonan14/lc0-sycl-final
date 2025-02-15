@@ -29,7 +29,6 @@
 
 #include <numeric>
 
-#include "neural/memcache.h"
 #include "neural/shared_params.h"
 #include "search/classic/search.h"
 #include "search/classic/stoppers/factory.h"
@@ -72,9 +71,7 @@ void Benchmark::Run(bool run_shorter_benchmark) {
   try {
     auto option_dict = options.GetOptionsDict();
 
-    auto backend = CreateMemCache(
-        BackendManager::Get()->CreateFromParams(option_dict),
-        option_dict.Get<int>(SharedBackendParams::kNNCacheSizeId));
+    auto network = NetworkFactory::LoadNetwork(option_dict);
 
     const int visits = option_dict.Get<int>(kNodesId);
     const int movetime = option_dict.Get<int>(kMovetimeId);
@@ -115,12 +112,12 @@ void Benchmark::Run(bool run_shorter_benchmark) {
 
       const auto start = std::chrono::steady_clock::now();
       auto search = std::make_unique<classic::Search>(
-          tree, backend.get(),
+          tree, network.get(),
           std::make_unique<CallbackUciResponder>(
               std::bind(&Benchmark::OnBestMove, this, std::placeholders::_1),
               std::bind(&Benchmark::OnInfo, this, std::placeholders::_1)),
           MoveList(), start, std::move(stopper), false, false, option_dict,
-          nullptr);
+          &cache, nullptr);
       search->StartThreads(option_dict.Get<int>(kThreadsOptionId));
       search->Wait();
       const auto end = std::chrono::steady_clock::now();

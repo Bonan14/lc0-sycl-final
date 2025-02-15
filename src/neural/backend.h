@@ -49,22 +49,18 @@ struct BackendAttributes {
   int maximum_batch_size;
 };
 
-struct EvalResultPtr {
-  float* q = nullptr;
-  float* d = nullptr;
-  float* m = nullptr;
-  std::span<float> p = {};
-};
-
 struct EvalResult {
   float q;
   float d;
   float m;
   std::vector<float> p;
+};
 
-  EvalResultPtr AsPtr() {
-    return EvalResultPtr{.q = &q, .d = &d, .m = &m, .p = p};
-  }
+struct EvalResultPtr {
+  float* q = nullptr;
+  float* d = nullptr;
+  float* m = nullptr;
+  std::span<float> p;
 };
 
 struct EvalPosition {
