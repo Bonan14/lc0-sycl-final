@@ -644,40 +644,6 @@ if get_option('build_backends')
       deps += cc.find_library('dl', required: false)
       has_backends = true
   endif
-  
-  
-  ## ~~~~
-  ## Sycl
-  ## ~~~~
-  if get_option('sycl') != 'off'
-      has_backends = true
-      message('Building SYCL')
-      add_project_arguments('-fsycl', language : 'cpp')
-
-      files += 'src/neural/backends/sycl/layers.cc.dp.cpp'
-      files += 'src/neural/backends/sycl/network_sycl.cc.dp.cpp'
-      files += 'src/neural/backends/sycl/common_kernels.dp.cpp'
-      files += 'src/neural/backends/sycl/fp16_kernels.dp.cpp'
-
-      if get_option('sycl') == 'l0'
-        message('Building SYCL for the L0 backend')
-        add_project_arguments('-DMKL_ILP64', language : 'cpp')
-        deps += cc.find_library('mkl_sycl', required: true)
-        deps += cc.find_library('mkl_intel_ilp64', required: true)
-        deps += cc.find_library('mkl_sequential', required: true)
-        deps += cc.find_library('mkl_core', required: true)
-        deps += cc.find_library('OpenCL', required: true)
-      elif get_option('sycl') == 'amd'
-        error('Building SYCL for AMD backend not yet supported')
-      else
-        error('Building SYCL for the NVIDIA backend not yet supported')
-      endif
-      if host_machine.system() == 'windows'
-        # For sycl under windows we need to link using icx to generate the device code.
-        # This script edits build.ninja for this and for an icx dependency issue.
-        meson.add_postconf_script('scripts/sycl_build_hack.py')
-      endif
-  endif
 
 endif # if get_option('build_backends')
 
