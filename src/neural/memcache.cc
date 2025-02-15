@@ -55,7 +55,7 @@ void CachedValueToEvalResult(const CachedValue& cv, const EvalResultPtr& ptr) {
   std::copy(cv.p.get(), cv.p.get() + ptr.p.size(), ptr.p.begin());
 }
 
-class MemCache : public CachingBackend {
+class MemCache : public Backend {
  public:
   MemCache(std::unique_ptr<Backend> wrapped, size_t capacity)
       : wrapped_backend_(std::move(wrapped)),
@@ -67,11 +67,6 @@ class MemCache : public CachingBackend {
   }
   std::unique_ptr<BackendComputation> CreateComputation() override;
   std::optional<EvalResult> GetCachedEvaluation(const EvalPosition&) override;
-
-  void ClearCache() override { cache_.Clear(); }
-  void SetCacheCapacity(size_t capacity) override {
-    cache_.SetCapacity(capacity);
-  }
 
  private:
   std::unique_ptr<Backend> wrapped_backend_;
@@ -94,14 +89,10 @@ class MemCacheComputation : public BackendComputation {
   }
   virtual AddInputResult AddInput(const EvalPosition& pos,
                                   EvalResultPtr result) override {
-    assert(pos.legal_moves.size() == result.p.size() || result.p.empty());
     const uint64_t hash = ComputeEvalPositionHash(pos);
     {
       HashKeyedCacheLock<CachedValue> lock(&memcache_->cache_, hash);
-      // Sometimes search queries NN without passing the legal moves. It is
-      // still cached in this case, but in subsequent queries we only return it
-      // legal moves are not passed again.
-      if (lock.holds_value() && (pos.legal_moves.empty() || lock->p)) {
+      if (lock.holds_value()) {
         CachedValueToEvalResult(**lock, result);
         return AddInputResult::FETCHED_IMMEDIATELY;
       }
@@ -112,10 +103,10 @@ class MemCacheComputation : public BackendComputation {
     value->p.reset(pos.legal_moves.empty() ? nullptr
                                            : new float[pos.legal_moves.size()]);
     return wrapped_computation_->AddInput(
-        pos, EvalResultPtr{&value->q, &value->d, &value->m,
-                           value->p ? std::span<float>{value->p.get(),
-                                                       pos.legal_moves.size()}
-                                    : std::span<float>{}});
+        pos, EvalResultPtr{&value->q,
+                           &value->d,
+                           &value->m,
+                           {value->p.get(), pos.legal_moves.size()}});
   }
 
   virtual void ComputeBlocking() override {
@@ -145,9 +136,7 @@ std::optional<EvalResult> MemCache::GetCachedEvaluation(
     const EvalPosition& pos) {
   const uint64_t hash = ComputeEvalPositionHash(pos);
   HashKeyedCacheLock<CachedValue> lock(&cache_, hash);
-  if (!lock.holds_value() || (!pos.legal_moves.empty() && !lock->p)) {
-    return std::nullopt;
-  }
+  if (!lock.holds_value()) return std::nullopt;
   EvalResult result;
   result.d = lock->d;
   result.q = lock->q;
@@ -162,8 +151,8 @@ std::optional<EvalResult> MemCache::GetCachedEvaluation(
 
 }  // namespace
 
-std::unique_ptr<CachingBackend> CreateMemCache(std::unique_ptr<Backend> wrapped,
-                                               size_t capacity) {
+std::unique_ptr<Backend> CreateMemCache(std::unique_ptr<Backend> wrapped,
+                                        size_t capacity) {
   return std::make_unique<MemCache>(std::move(wrapped), capacity);
 }
 

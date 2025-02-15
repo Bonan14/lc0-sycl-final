@@ -155,15 +155,12 @@ void EngineClassic::UpdateFromUciOptions() {
   const auto network_configuration =
       NetworkFactory::BackendConfiguration(options_);
   if (network_configuration_ != network_configuration) {
-    backend_ =
-        CreateMemCache(BackendManager::Get()->CreateFromParams(options_),
-                       options_.Get<int>(SharedBackendParams::kNNCacheSizeId));
+    network_ = NetworkFactory::LoadNetwork(options_);
     network_configuration_ = network_configuration;
-  } else {
-    // If network is not changed, cache size still may have changed.
-    backend_->SetCacheCapacity(
-        options_.Get<int>(SharedBackendParams::kNNCacheSizeId));
   }
+
+  // Cache size.
+  cache_.SetCapacity(options_.Get<int>(SharedBackendParams::kNNCacheSizeId));
 
   // Check whether we can update the move timer in "Go".
   strict_uci_timing_ = options_.Get<bool>(kStrictUciTiming);
@@ -181,12 +178,12 @@ void EngineClassic::NewGame() {
   // newgame and goes straight into go.
   ResetMoveTimer();
   SharedLock lock(busy_mutex_);
+  cache_.Clear();
   search_.reset();
   tree_.reset();
   CreateFreshTimeManager();
   current_position_ = {ChessBoard::kStartposFen, {}};
   UpdateFromUciOptions();
-  backend_->ClearCache();
 }
 
 void EngineClassic::SetPosition(const std::string& fen,
@@ -268,39 +265,52 @@ class PonderResponseTransformer : public TransformingUciResponder {
   std::string ponder_move_;
 };
 
-void ValueOnlyGo(classic::NodeTree* tree, Backend* backend,
+void ValueOnlyGo(classic::NodeTree* tree, Network* network,
+                 const OptionsDict& options,
                  std::unique_ptr<UciResponder> responder) {
+  auto input_format = network->GetCapabilities().input_format;
+
   const auto& board = tree->GetPositionHistory().Last().GetBoard();
   auto legal_moves = board.GenerateLegalMoves();
   tree->GetCurrentHead()->CreateEdges(legal_moves);
   PositionHistory history = tree->GetPositionHistory();
-  std::vector<float> comp_q;
-  comp_q.reserve(legal_moves.size());
-  auto comp = backend->CreateComputation();
+  std::vector<InputPlanes> planes;
   for (auto edge : tree->GetCurrentHead()->Edges()) {
     history.Append(edge.GetMove());
     if (history.ComputeGameResult() == GameResult::UNDECIDED) {
-      comp_q.emplace_back();
-      comp->AddInput(
-          EvalPosition{
-              .pos = history.GetPositions(),
-              .legal_moves = {},
-          },
-          EvalResultPtr{.q = &comp_q.back()});
+      planes.emplace_back(EncodePositionForNN(
+          input_format, history, 8, FillEmptyHistory::FEN_ONLY, nullptr));
     }
     history.Pop();
   }
 
+  std::vector<float> comp_q;
+  int batch_size = options.Get<int>(classic::SearchParams::kMiniBatchSizeId);
+  if (batch_size == 0) batch_size = network->GetMiniBatchSize();
+
+  for (size_t i = 0; i < planes.size(); i += batch_size) {
+    auto comp = network->NewComputation();
+    for (int j = 0; j < batch_size; j++) {
+      comp->AddInput(std::move(planes[i + j]));
+      if (i + j + 1 == planes.size()) break;
+    }
+    comp->ComputeBlocking();
+
+    for (int j = 0; j < batch_size; j++) comp_q.push_back(comp->GetQVal(j));
+  }
+
   Move best;
+  int comp_idx = 0;
   float max_q = std::numeric_limits<float>::lowest();
-  for (size_t comp_idx = 0; auto edge : tree->GetCurrentHead()->Edges()) {
+  for (auto edge : tree->GetCurrentHead()->Edges()) {
     history.Append(edge.GetMove());
     auto result = history.ComputeGameResult();
     float q = -1;
     if (result == GameResult::UNDECIDED) {
       // NN eval is for side to move perspective - so if its good, its bad for
       // us.
-      q = -comp_q[comp_idx++];
+      q = -comp_q[comp_idx];
+      comp_idx++;
     } else if (result == GameResult::DRAW) {
       q = 0;
     } else {
@@ -365,7 +375,7 @@ void EngineClassic::Go(const GoParams& params) {
     responder = std::make_unique<MovesLeftResponseFilter>(std::move(responder));
   }
   if (options_.Get<bool>(kValueOnly)) {
-    ValueOnlyGo(tree_.get(), backend_.get(), std::move(responder));
+    ValueOnlyGo(tree_.get(), network_.get(), options_, std::move(responder));
     return;
   }
 
@@ -375,10 +385,10 @@ void EngineClassic::Go(const GoParams& params) {
 
   auto stopper = time_manager_->GetStopper(params, *tree_.get());
   search_ = std::make_unique<classic::Search>(
-      *tree_, backend_.get(), std::move(responder),
+      *tree_, network_.get(), std::move(responder),
       StringsToMovelist(params.searchmoves, tree_->HeadPosition().GetBoard()),
       *move_start_time_, std::move(stopper), params.infinite, params.ponder,
-      options_, syzygy_tb_.get());
+      options_, &cache_, syzygy_tb_.get());
 
   LOGFILE << "Timer started at "
           << FormatTime(SteadyClockToSystemClock(*move_start_time_));

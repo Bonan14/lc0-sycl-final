@@ -32,73 +32,95 @@ namespace lczero {
 class PolicyEvaluator : public Evaluator {
  public:
   void Reset(const PlayerOptions& player) override {
-    comp_ = player.backend->CreateComputation();
+    comp = player.network->NewComputation();
+    input_format = player.network->GetCapabilities().input_format;
+    transforms.clear();
+    comp_idx = 0;
   }
   void Gather(classic::NodeTree* tree) override {
-    const auto& history = tree->GetPositionHistory();
-    moves_.clear();
-    for (auto edge : tree->GetCurrentHead()->Edges()) {
-      moves_.push_back(edge.GetMove());
-    }
-    p_.resize(moves_.size());
-    comp_->AddInput(
-        EvalPosition{
-            .pos = history.GetPositions(),
-            .legal_moves = moves_,
-        },
-        EvalResultPtr{.p = p_});
+    int transform;
+    auto planes =
+        EncodePositionForNN(input_format, tree->GetPositionHistory(), 8,
+                            FillEmptyHistory::FEN_ONLY, &transform);
+    transforms.push_back(transform);
+    comp->AddInput(std::move(planes));
   }
-  void Run() override { comp_->ComputeBlocking(); }
+  void Run() override { comp->ComputeBlocking(); }
   void MakeBestMove(classic::NodeTree* tree) override {
-    size_t best_idx = std::max_element(p_.begin(), p_.end()) - p_.begin();
-    tree->MakeMove(moves_[best_idx]);
+    Move best;
+    float max_p = std::numeric_limits<float>::lowest();
+    for (auto edge : tree->GetCurrentHead()->Edges()) {
+      float p = comp->GetPVal(comp_idx,
+                              edge.GetMove().as_nn_index(transforms[comp_idx]));
+      if (p >= max_p) {
+        max_p = p;
+        best = edge.GetMove(tree->GetPositionHistory().IsBlackToMove());
+      }
+    }
+    tree->MakeMove(best);
+    comp_idx++;
   }
 
-  std::unique_ptr<BackendComputation> comp_;
-  std::vector<Move> moves_;
-  std::vector<float> p_;
+  std::unique_ptr<NetworkComputation> comp;
+  pblczero::NetworkFormat::InputFormat input_format;
+  int comp_idx;
+  std::vector<int> transforms;
 };
 
 class ValueEvaluator : public Evaluator {
  public:
   void Reset(const PlayerOptions& player) override {
-    comp_ = player.backend->CreateComputation();
+    comp = player.network->NewComputation();
+    input_format = player.network->GetCapabilities().input_format;
+    comp_idx = 0;
   }
   void Gather(classic::NodeTree* tree) override {
     PositionHistory history = tree->GetPositionHistory();
-    q_.clear();
-    q_.reserve(tree->GetCurrentHead()->GetNumEdges());
-    moves_.clear();
     for (auto edge : tree->GetCurrentHead()->Edges()) {
-      moves_.push_back(edge.GetMove());
       history.Append(edge.GetMove());
-      auto result = history.ComputeGameResult();
-      if (result == GameResult::UNDECIDED) {
-        comp_->AddInput(
-            EvalPosition{
-                .pos = history.GetPositions(),
-                .legal_moves = {},
-            },
-            EvalResultPtr{.q = &q_.emplace_back()});
-      } else if (result == GameResult::DRAW) {
-        q_.push_back(0);
-      } else {
-        // A legal move to a non-drawn terminal without tablebases must be a
-        // win.
-        q_.push_back(1);
+      if (history.ComputeGameResult() == GameResult::UNDECIDED) {
+        int transform;
+        auto planes = EncodePositionForNN(
+            input_format, history, 8, FillEmptyHistory::FEN_ONLY, &transform);
+        comp->AddInput(std::move(planes));
       }
       history.Pop();
     }
   }
-  void Run() override { comp_->ComputeBlocking(); }
+  void Run() override { comp->ComputeBlocking(); }
   void MakeBestMove(classic::NodeTree* tree) override {
-    size_t best_idx = std::max_element(q_.begin(), q_.end()) - q_.begin();
-    tree->MakeMove(moves_[best_idx]);
+    Move best;
+    float max_q = std::numeric_limits<float>::lowest();
+    PositionHistory history = tree->GetPositionHistory();
+    for (auto edge : tree->GetCurrentHead()->Edges()) {
+      history.Append(edge.GetMove());
+      auto result = history.ComputeGameResult();
+      float q = -1;
+      if (result == GameResult::UNDECIDED) {
+        // NN eval is for side to move perspective - so if its good, its bad for
+        // us.
+        q = -comp->GetQVal(comp_idx);
+        comp_idx++;
+      } else if (result == GameResult::DRAW) {
+        q = 0;
+      } else {
+        // A legal move to a non-drawn terminal without tablebases must be a
+        // win.
+        q = 1;
+      }
+      if (q >= max_q) {
+        max_q = q;
+        best = edge.GetMove(tree->GetPositionHistory().IsBlackToMove());
+      }
+      history.Pop();
+    }
+    tree->MakeMove(best);
   }
 
-  std::unique_ptr<BackendComputation> comp_;
-  std::vector<Move> moves_;
-  std::vector<float> q_;
+  std::unique_ptr<NetworkComputation> comp;
+  pblczero::NetworkFormat::InputFormat input_format;
+  int comp_idx;
+  std::vector<int> transforms;
 };
 
 MultiSelfPlayGames::MultiSelfPlayGames(PlayerOptions player1,
