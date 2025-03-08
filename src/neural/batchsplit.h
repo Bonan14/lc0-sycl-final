@@ -1,6 +1,6 @@
 /*
   This file is part of Leela Chess Zero.
-  Copyright (C) 2024 The LCZero Authors
+  Copyright (C) 2025 The LCZero Authors
 
   Leela Chess is free software: you can redistribute it and/or modify
   it under the terms of the GNU General Public License as published by
@@ -27,42 +27,12 @@
 
 #pragma once
 
-#include <memory>
-#include <vector>
-
-#include "search/search.h"
+#include "neural/backend.h"
 
 namespace lczero {
 
-class SearchFactory;
-
-// A singleton class that keeps one instance of each search algorithm's factory.
-class SearchManager {
- public:
-  static SearchManager* Get();
-  void AddSearchFactory(std::unique_ptr<SearchFactory>);
-
-  std::vector<std::string_view> GetSearchNames() const;
-
-  // Returns the factory for the given algorithm name. Returns nullptr if not
-  // found.
-  SearchFactory* GetFactoryByName(std::string_view name) const;
-
-  struct Register {
-    Register(std::unique_ptr<SearchFactory> factory) {
-      SearchManager::Get()->AddSearchFactory(std::move(factory));
-    }
-  };
-
- private:
-  SearchManager() = default;
-
-  std::vector<std::unique_ptr<SearchFactory>> algorithms_;
-};
-
-#define REGISTER_SEARCH(alg)                                              \
-  namespace {                                                             \
-  static SearchManager::Register reg3b50Y_##alg(std::make_unique<alg>()); \
-  }
+// Creates a backend wrapper that ensures that the maximum batch size of the
+// wrapped backend is respected.
+std::unique_ptr<Backend> CreateBatchSplitingBackend(Backend* parent);
 
 }  // namespace lczero
