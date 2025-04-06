@@ -31,6 +31,7 @@
 
 #include "chess/pgn.h"
 #include "neural/factory.h"
+#include "neural/memcache.h"
 #include "neural/shared_params.h"
 #include "search/classic/search.h"
 #include "search/classic/stoppers/factory.h"
@@ -157,17 +158,15 @@ void SelfPlayTournament::PopulateOptions(OptionsParser* options) {
   defaults->Set<int>(classic::SearchParams::kTaskWorkersPerSearchWorkerId, 0);
 }
 
-SelfPlayTournament::SelfPlayTournament(
-    const OptionsDict& options,
-    CallbackUciResponder::BestMoveCallback best_move_info,
-    CallbackUciResponder::ThinkingCallback thinking_info,
-    GameInfo::Callback game_info, TournamentInfo::Callback tournament_info)
+SelfPlayTournament::SelfPlayTournament(const OptionsDict& options,
+                                       UciResponder* uci_responder,
+                                       GameInfo::Callback game_info,
+                                       TournamentInfo::Callback tournament_info)
     : player_options_{{options.GetSubdict("player1").GetSubdict("white"),
                        options.GetSubdict("player1").GetSubdict("black")},
                       {options.GetSubdict("player2").GetSubdict("white"),
                        options.GetSubdict("player2").GetSubdict("black")}},
-      best_move_callback_(best_move_info),
-      info_callback_(thinking_info),
+      uci_responder_(uci_responder),
       game_callback_(game_info),
       tournament_callback_(tournament_info),
       kTotalGames(options.Get<int>(kTotalGamesId)),
@@ -217,21 +216,14 @@ SelfPlayTournament::SelfPlayTournament(
     for (const auto& color : {"white", "black"}) {
       const auto& opts = options.GetSubdict(name).GetSubdict(color);
       const auto config = NetworkFactory::BackendConfiguration(opts);
-      if (networks_.find(config) == networks_.end()) {
-        networks_.emplace(config, NetworkFactory::LoadNetwork(opts));
+      if (!backends_.contains(config)) {
+        backends_.emplace(
+            config,
+            CreateMemCache(BackendManager::Get()->CreateFromParams(opts),
+                           options.GetSubdict(name).Get<int>(
+                               SharedBackendParams::kNNCacheSizeId)));
       }
     }
-  }
-
-  // Initializing cache.
-  cache_[0] = std::make_shared<NNCache>(options.GetSubdict("player1").Get<int>(
-      SharedBackendParams::kNNCacheSizeId));
-  if (kShareTree) {
-    cache_[1] = cache_[0];
-  } else {
-    cache_[1] =
-        std::make_shared<NNCache>(options.GetSubdict("player2").Get<int>(
-            SharedBackendParams::kNNCacheSizeId));
   }
 
   // SearchLimits.
@@ -312,10 +304,9 @@ void SelfPlayTournament::PlayOneGame(int game_number) {
         player_options_[pl_idx][color].Get<bool>(kMoveThinkingId);
     // Populate per-player options.
     PlayerOptions& opt = options[color_idx[pl_idx]];
-    opt.network = networks_[NetworkFactory::BackendConfiguration(
+    opt.backend = backends_[NetworkFactory::BackendConfiguration(
                                 player_options_[pl_idx][color])]
                       .get();
-    opt.cache = cache_[pl_idx].get();
     opt.uci_options = &player_options_[pl_idx][color];
     opt.search_limits = search_limits_[pl_idx][color];
 
@@ -329,14 +320,14 @@ void SelfPlayTournament::PlayOneGame(int game_number) {
       }
       // In non-verbose mode, output the last "info" message.
       if (!verbose_thinking && !last_thinking_info.empty()) {
-        info_callback_(last_thinking_info);
+        uci_responder_->OutputThinkingInfo(&last_thinking_info);
         last_thinking_info.clear();
       }
       BestMoveInfo rich_info = info;
       rich_info.player = pl_idx + 1;
       rich_info.is_black = player1_black ? pl_idx == 0 : pl_idx != 0;
       rich_info.game_id = game_number;
-      best_move_callback_(rich_info);
+      uci_responder_->OutputBestMove(&rich_info);
     };
 
     opt.info_callback =
@@ -349,7 +340,7 @@ void SelfPlayTournament::PlayOneGame(int game_number) {
             info.game_id = game_number;
           }
           if (verbose_thinking) {
-            info_callback_(rich_info);
+            uci_responder_->OutputThinkingInfo(&rich_info);
           } else {
             // In non-verbose mode, remember the last "info" messages.
             last_thinking_info = std::move(rich_info);
@@ -453,11 +444,11 @@ void SelfPlayTournament::PlayMultiGames(int game_id, size_t game_count) {
   }
 
   PlayerOptions options[2];
-  options[0].network =
-      networks_[NetworkFactory::BackendConfiguration(player_options_[0][0])]
+  options[0].backend =
+      backends_[NetworkFactory::BackendConfiguration(player_options_[0][0])]
           .get();
-  options[1].network =
-      networks_[NetworkFactory::BackendConfiguration(player_options_[1][1])]
+  options[1].backend =
+      backends_[NetworkFactory::BackendConfiguration(player_options_[1][1])]
           .get();
 
   std::list<std::unique_ptr<MultiSelfPlayGames>>::iterator game1_iter;
@@ -474,11 +465,11 @@ void SelfPlayTournament::PlayMultiGames(int game_id, size_t game_count) {
   // PLAY GAMEs!
   if (!aborted) game1.Play();
 
-  options[0].network =
-      networks_[NetworkFactory::BackendConfiguration(player_options_[0][1])]
+  options[0].backend =
+      backends_[NetworkFactory::BackendConfiguration(player_options_[0][1])]
           .get();
-  options[1].network =
-      networks_[NetworkFactory::BackendConfiguration(player_options_[1][0])]
+  options[1].backend =
+      backends_[NetworkFactory::BackendConfiguration(player_options_[1][0])]
           .get();
 
   std::list<std::unique_ptr<MultiSelfPlayGames>>::iterator game2_iter;

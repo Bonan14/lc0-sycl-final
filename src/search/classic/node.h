@@ -439,6 +439,11 @@ class Edge_Iterator : public EdgeAndNode {
  public:
   using Ptr = std::conditional_t<is_const, const std::unique_ptr<Node>*,
                                  std::unique_ptr<Node>*>;
+  using value_type = Edge_Iterator;
+  using iterator_category = std::forward_iterator_tag;
+  using difference_type = std::ptrdiff_t;
+  using pointer = Edge_Iterator*;
+  using reference = Edge_Iterator&;
 
   // Creates "end()" iterator.
   Edge_Iterator() {}
@@ -643,7 +648,7 @@ class NodeTree {
   // moves added). Returns false, if the position is completely different,
   // or if it's shorter than before.
   bool ResetToPosition(const std::string& starting_fen,
-                       const std::vector<Move>& moves);
+                       const std::vector<std::string>& moves);
   const Position& HeadPosition() const { return history_.Last(); }
   int GetPlyCount() const { return HeadPosition().GetGamePly(); }
   bool IsBlackToMove() const { return HeadPosition().IsBlackToMove(); }

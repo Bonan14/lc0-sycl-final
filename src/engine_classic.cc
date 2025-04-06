@@ -50,13 +50,6 @@ const OptionId kSyzygyTablebaseId{
     's'};
 const OptionId kPonderId{"", "Ponder",
                          "This option is ignored. Here to please chess GUIs."};
-const OptionId kUciChess960{
-    "chess960", "UCI_Chess960",
-    "Castling moves are encoded as \"king takes rook\"."};
-const OptionId kShowWDL{"show-wdl", "UCI_ShowWDL",
-                        "Show win, draw and lose probability."};
-const OptionId kShowMovesleft{"show-movesleft", "UCI_ShowMovesLeft",
-                              "Show estimated moves left."};
 const OptionId kStrictUciTiming{"strict-uci-timing", "StrictTiming",
                                 "The UCI host compensates for lag, waits for "
                                 "the 'readyok' reply before sending 'go' and "
@@ -72,7 +65,7 @@ MoveList StringsToMovelist(const std::vector<std::string>& moves,
     const auto legal_moves = board.GenerateLegalMoves();
     const auto end = legal_moves.end();
     for (const auto& move : moves) {
-      const auto m = board.GetModernMove({move, board.flipped()});
+      const Move m = board.ParseMove(move);
       if (std::find(legal_moves.begin(), end, m) != end) result.emplace_back(m);
     }
     if (result.empty()) throw Exception("No legal searchmoves.");
@@ -107,9 +100,6 @@ void EngineClassic::PopulateOptions(OptionsParser* options) {
   // Add "Ponder" option to signal to GUIs that we support pondering.
   // This option is currently not used by lc0 in any way.
   options->Add<BoolOption>(kPonderId) = true;
-  options->Add<BoolOption>(kUciChess960) = false;
-  options->Add<BoolOption>(kShowWDL) = false;
-  options->Add<BoolOption>(kShowMovesleft) = false;
 
   PopulateTimeManagementOptions(
       is_simple ? classic::RunType::kSimpleUci : classic::RunType::kUci,
@@ -149,12 +139,11 @@ void EngineClassic::UpdateFromUciOptions() {
   const auto network_configuration =
       NetworkFactory::BackendConfiguration(options_);
   if (network_configuration_ != network_configuration) {
-    network_ = NetworkFactory::LoadNetwork(options_);
+    backend_ =
+        CreateMemCache(BackendManager::Get()->CreateFromParams(options_),
+                       options_.Get<int>(SharedBackendParams::kNNCacheSizeId));
     network_configuration_ = network_configuration;
   }
-
-  // Cache size.
-  cache_.SetCapacity(options_.Get<int>(SharedBackendParams::kNNCacheSizeId));
 
   // Check whether we can update the move timer in "Go".
   strict_uci_timing_ = options_.Get<bool>(kStrictUciTiming);
@@ -172,12 +161,12 @@ void EngineClassic::NewGame() {
   // newgame and goes straight into go.
   ResetMoveTimer();
   SharedLock lock(busy_mutex_);
-  cache_.Clear();
   search_.reset();
   tree_.reset();
   CreateFreshTimeManager();
   current_position_ = {ChessBoard::kStartposFen, {}};
   UpdateFromUciOptions();
+  backend_->ClearCache();
 }
 
 void EngineClassic::SetPosition(const std::string& fen,
@@ -190,21 +179,6 @@ void EngineClassic::SetPosition(const std::string& fen,
   search_.reset();
 }
 
-Position EngineClassic::ApplyPositionMoves() {
-  ChessBoard board;
-  int no_capture_ply;
-  int game_move;
-  board.SetFromFen(current_position_.fen, &no_capture_ply, &game_move);
-  int game_ply = 2 * game_move - (board.flipped() ? 1 : 2);
-  Position pos(board, no_capture_ply, game_ply);
-  for (std::string move_str : current_position_.moves) {
-    Move move(move_str);
-    if (pos.IsBlackToMove()) move.Mirror();
-    pos = Position(pos, move);
-  }
-  return pos;
-}
-
 void EngineClassic::SetupPosition(const std::string& fen,
                                   const std::vector<std::string>& moves_str) {
   SharedLock lock(busy_mutex_);
@@ -214,9 +188,7 @@ void EngineClassic::SetupPosition(const std::string& fen,
 
   if (!tree_) tree_ = std::make_unique<classic::NodeTree>();
 
-  std::vector<Move> moves;
-  for (const auto& move : moves_str) moves.emplace_back(move);
-  const bool is_same_game = tree_->ResetToPosition(fen, moves);
+  const bool is_same_game = tree_->ResetToPosition(fen, moves_str);
   if (!is_same_game) CreateFreshTimeManager();
 }
 
@@ -229,9 +201,9 @@ namespace {
 class PonderResponseTransformer : public TransformingUciResponder {
  public:
   PonderResponseTransformer(std::unique_ptr<UciResponder> parent,
-                            std::string ponder_move)
+                            Move ponder_move)
       : TransformingUciResponder(std::move(parent)),
-        ponder_move_(std::move(ponder_move)) {}
+        ponder_move_(ponder_move) {}
 
   void TransformThinkingInfo(std::vector<ThinkingInfo>* infos) override {
     // Output all stats from main variation (not necessary the ponder move)
@@ -247,7 +219,7 @@ class PonderResponseTransformer : public TransformingUciResponder {
         if (ponder_info.wdl) std::swap(ponder_info.wdl->w, ponder_info.wdl->l);
         ponder_info.pv.clear();
       }
-      if (!info.pv.empty() && info.pv[0].as_string() == ponder_move_) {
+      if (!info.pv.empty() && info.pv[0] == ponder_move_) {
         ponder_info.pv.assign(info.pv.begin() + 1, info.pv.end());
       }
     }
@@ -256,7 +228,7 @@ class PonderResponseTransformer : public TransformingUciResponder {
   }
 
  private:
-  std::string ponder_move_;
+  Move ponder_move_;
 };
 
 }  // namespace
@@ -279,26 +251,12 @@ void EngineClassic::Go(const GoParams& params) {
     std::string ponder_move = moves.back();
     moves.pop_back();
     SetupPosition(current_position_.fen, moves);
-    responder = std::make_unique<PonderResponseTransformer>(
-        std::move(responder), ponder_move);
+    Move move = tree_->HeadPosition().GetBoard().ParseMove(ponder_move);
+    if (tree_->IsBlackToMove()) move.Flip();
+    responder =
+        std::make_unique<PonderResponseTransformer>(std::move(responder), move);
   } else {
     SetupPosition(current_position_.fen, current_position_.moves);
-  }
-
-  if (!options_.Get<bool>(kUciChess960)) {
-    // Remap FRC castling to legacy castling.
-    responder = std::make_unique<Chess960Transformer>(
-        std::move(responder), tree_->HeadPosition().GetBoard());
-  }
-
-  if (!options_.Get<bool>(kShowWDL)) {
-    // Strip WDL information from the response.
-    responder = std::make_unique<WDLResponseFilter>(std::move(responder));
-  }
-
-  if (!options_.Get<bool>(kShowMovesleft)) {
-    // Strip movesleft information from the response.
-    responder = std::make_unique<MovesLeftResponseFilter>(std::move(responder));
   }
 
   if (options_.Get<Button>(kClearTree).TestAndReset()) {
@@ -307,10 +265,10 @@ void EngineClassic::Go(const GoParams& params) {
 
   auto stopper = time_manager_->GetStopper(params, *tree_.get());
   search_ = std::make_unique<classic::Search>(
-      *tree_, network_.get(), std::move(responder),
+      *tree_, backend_.get(), std::move(responder),
       StringsToMovelist(params.searchmoves, tree_->HeadPosition().GetBoard()),
       *move_start_time_, std::move(stopper), params.infinite, params.ponder,
-      options_, &cache_, syzygy_tb_.get());
+      options_, syzygy_tb_.get());
 
   LOGFILE << "Timer started at "
           << FormatTime(SteadyClockToSystemClock(*move_start_time_));

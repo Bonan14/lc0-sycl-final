@@ -32,7 +32,9 @@
 #include "chess/gamestate.h"
 #include "chess/position.h"
 #include "neural/backend.h"
+#include "neural/memcache.h"
 #include "neural/register.h"
+#include "neural/shared_params.h"
 
 namespace lczero {
 
@@ -46,13 +48,14 @@ GameState MakeGameState(const std::string& fen,
                         const std::vector<std::string>& moves) {
   GameState state;
   state.startpos = Position::FromFen(fen);
+  ChessBoard cur_board = state.startpos.GetBoard();
   state.moves.reserve(moves.size());
-  bool is_black = state.startpos.IsBlackToMove();
-  std::transform(moves.begin(), moves.end(), std::back_inserter(state.moves),
-                 [&](const std::string& move) {
-                   return Move(move, is_black);
-                   is_black = !is_black;
-                 });
+  for (const auto& move : moves) {
+    Move m = cur_board.ParseMove(move);
+    state.moves.push_back(m);
+    cur_board.ApplyMove(m);
+    cur_board.Mirror();
+  }
   return state;
 }
 }  // namespace
@@ -62,15 +65,25 @@ void Engine::EnsureSearchStopped() {
   search_->WaitSearch();
 }
 
-void Engine::EnsureBackendCreated() {
-  if (backend_) return;
-  backend_ = BackendManager::Get()->CreateFromParams(options_);
-  search_->SetBackend(backend_.get());
+void Engine::UpdateBackendConfig() {
+  const std::string backend_name =
+      options_.Get<std::string>(SharedBackendParams::kBackendId);
+  const size_t cache_size =
+      options_.Get<int>(SharedBackendParams::kNNCacheSizeId);
+  if (!backend_ || backend_name != backend_name_ ||
+      backend_->UpdateConfiguration(options_) == Backend::NEED_RESTART) {
+    backend_name_ = backend_name;
+    backend_ = CreateMemCache(BackendManager::Get()->CreateFromParams(options_),
+                              cache_size);
+    search_->SetBackend(backend_.get());
+  } else {
+    backend_->SetCacheSize(cache_size);
+  }
 }
 
 void Engine::SetPosition(const std::string& fen,
                          const std::vector<std::string>& moves) {
-  EnsureBackendCreated();
+  UpdateBackendConfig();
   EnsureSearchStopped();
   search_->SetPosition(MakeGameState(fen, moves));
   search_initialized_ = true;
