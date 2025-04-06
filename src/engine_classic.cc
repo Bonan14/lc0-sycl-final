@@ -32,7 +32,9 @@
 #include <functional>
 
 #include "neural/shared_params.h"
+#include "search/classic/params.h"
 #include "search/classic/search.h"
+#include "utils/optionsparser.h" 
 #include "search/classic/stoppers/factory.h"
 #include "utils/commandline.h"
 #include "utils/configfile.h"

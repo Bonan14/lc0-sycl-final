@@ -34,6 +34,7 @@
 #include "neural/shared_params.h"
 #include "utils/atomic_vector.h"
 #include "utils/fastmath.h"
+#include "utils/exception.h"
 
 namespace lczero {
 namespace {
@@ -76,8 +77,8 @@ class NetworkAsBackend : public Backend {
         options.Get<std::string>(SharedBackendParams::kWeightsId)) {
       return NEED_RESTART;
     }
-    softmax_policy_temperature_ =
-        1.0f / options.Get<float>(SharedBackendParams::kPolicySoftmaxTemp);
+    softmax_policy_temperature_(
+        1.0f / options.GetOrDefault<float>(SharedBackendParams::kPolicySoftmaxTemp, 1.359000f));
     fill_empty_history_ = EncodeHistoryFill(
         options.Get<std::string>(SharedBackendParams::kHistoryFill));
     return UPDATE_OK;
@@ -95,14 +96,66 @@ class NetworkAsBackend : public Backend {
   friend class NetworkAsBackendComputation;
 };
 
+/*
+class NetworkAsBackend : public Backend {
+ public:
+  NetworkAsBackend(std::unique_ptr<Network> network, const OptionsDict& options)
+      : network_(std::move(network)),
+        softmax_policy_temperature_(
+            1.0f / options.GetOrDefault<float>(SharedBackendParams::kPolicySoftmaxTemp, 1.359000f)),
+        fill_empty_history_(EncodeHistoryFill(
+            options.Get<std::string>(SharedBackendParams::kHistoryFill))) {
+    const NetworkCapabilities& caps = network_->GetCapabilities();
+    attrs_.has_mlh = caps.has_mlh();
+    attrs_.has_wdl = caps.has_wdl();
+    attrs_.runs_on_cpu = network_->IsCpu();
+    attrs_.suggested_num_search_threads = std::max(network_->GetThreads(), 2); // Ensure at least 1
+    attrs_.recommended_batch_size = std::min(network_->GetMiniBatchSize(), 256); // Ensure at least 1
+    attrs_.maximum_batch_size = 1024;
+
+    // Log the backend attributes
+    CERR << "[Backend Attributes] "
+         << "has_mlh: " << attrs_.has_mlh << " "
+         << "has_wdl: " << attrs_.has_wdl << " "
+         << "runs_on_cpu: " << attrs_.runs_on_cpu << " "
+         << "suggested_num_search_threads: " << attrs_.suggested_num_search_threads << " "
+         << "recommended_batch_size: " << attrs_.recommended_batch_size << " "
+         << "maximum_batch_size: " << attrs_.maximum_batch_size << " [Backend Attributes]"
+         << "\n";
+
+    input_format_ = caps.input_format;
+  }
+
+  BackendAttributes GetAttributes() const override { return attrs_; }
+  virtual std::unique_ptr<BackendComputation> CreateComputation() override;
+
+ private:
+  std::unique_ptr<Network> network_;
+  BackendAttributes attrs_;
+  pblczero::NetworkFormat::InputFormat input_format_;
+  float softmax_policy_temperature_;
+  FillEmptyHistory fill_empty_history_;
+  friend class NetworkAsBackendComputation;
+};*/
+
+
 class NetworkAsBackendComputation : public BackendComputation {
  public:
   NetworkAsBackendComputation(NetworkAsBackend* backend)
       : backend_(backend),
         computation_(backend_->network_->NewComputation()),
-        entries_(backend_->attrs_.maximum_batch_size) {}
+        entries_(backend_->GetAttributes().maximum_batch_size) {}
 
-  size_t UsedBatchSize() const override { return entries_.size(); }
+  //size_t UsedBatchSize() const override { return backend_->GetAttributes().recommended_batch_size; /*entries_.size();*/ }
+
+  size_t UsedBatchSize() const override {
+    size_t batch_size = backend_->GetAttributes().recommended_batch_size;
+    if (batch_size == 0) {
+        CERR << "[WARNING] Recommended batch size is 0, defaulting to 256.";
+        return 256;
+    }
+    return batch_size;
+  }
 
   AddInputResult AddInput(const EvalPosition& pos,
                           EvalResultPtr result) override {
@@ -112,19 +165,22 @@ class NetworkAsBackendComputation : public BackendComputation {
                                      backend_->fill_empty_history_, &transform),
         .legal_moves = MoveList(pos.legal_moves.begin(), pos.legal_moves.end()),
         .result = result,
-        .transform = 0});
-    entries_[idx].transform = transform;
+        .transform_ = 0});
+    entries_[idx].transform_ = transform;
     return ENQUEUED_FOR_EVAL;
   }
 
   void ComputeBlocking() override {
     for (auto& entry : entries_) computation_->AddInput(std::move(entry.input));
     computation_->ComputeBlocking();
+    int e_size = backend_->GetAttributes().maximum_batch_size;
     for (size_t i = 0; i < entries_.size(); ++i) {
       const EvalResultPtr& result = entries_[i].result;
-      if (result.q) *result.q = computation_->GetQVal(i);
-      if (result.d) *result.d = computation_->GetDVal(i);
-      if (result.m) *result.m = computation_->GetMVal(i);
+      if (backend_->GetAttributes().has_wdl && backend_->GetAttributes().has_mlh) {
+      *result.q = computation_->GetQVal(i);
+      *result.d = computation_->GetDVal(i);
+      *result.m = computation_->GetMVal(i);
+      }
       if (!result.p.empty()) SoftmaxPolicy(result.p, computation_.get(), i);
     }
   }
@@ -132,21 +188,23 @@ class NetworkAsBackendComputation : public BackendComputation {
   void SoftmaxPolicy(std::span<float> dst,
                      const NetworkComputation* computation, int idx) {
     const std::vector<Move>& moves = entries_[idx].legal_moves;
-    const int transform = entries_[idx].transform;
+    const int transform = entries_[idx].transform_;
     // Copy the values to the destination array and compute the maximum.
+    int counter = 0;
     const float max_p = std::accumulate(
         moves.begin(), moves.end(), -std::numeric_limits<float>::infinity(),
-        [&, counter = 0](float max_p, const Move& move) mutable {
+        [&](float max_p, const Move& move) mutable {
           return std::max(max_p, dst[counter++] = computation->GetPVal(
                                      idx, MoveToNNIndex(move, transform)));
         });
+        counter = 0;
     // Compute the softmax and compute the total.
     const float temperature = backend_->softmax_policy_temperature_;
     float total = std::accumulate(
         dst.begin(), dst.end(), 0.0f, [&](float total, float& val) {
           return total + (val = FastExp((val - max_p) * temperature));
         });
-    const float scale = total > 0.0f ? 1.0f / total : 1.0f;
+    const float scale = total >= 0.001f ? 1.0f / total : 1.0f;
     // Scale the values to sum to 1.0.
     std::for_each(dst.begin(), dst.end(), [&](float& val) { val *= scale; });
   }
@@ -156,7 +214,7 @@ class NetworkAsBackendComputation : public BackendComputation {
     InputPlanes input;
     MoveList legal_moves;
     EvalResultPtr result;
-    int transform;
+    int transform_;
   };
 
   NetworkAsBackend* backend_;

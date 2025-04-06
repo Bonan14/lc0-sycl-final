@@ -92,6 +92,36 @@ inline float FastLogistic(const float a) {
   return 1.0f / (1.0f + FastExp(-a));
 }
 
+inline float Fast_POW(float a, int b) {
+    // Handle the b = 0 case explicitly
+    if (b == 0) return 1.0f;
+    float res = 1.0f;
+    while (b) {
+        if (b % 2) res *= a;
+        a *= a;
+        b /= 2;
+    }
+    return res;
+}
+
+inline float Fast_POW2(float a, int b) {
+    // Handle the b = 0 case explicitly
+    if (b == 0.0f) return 1.0f;  
+    float res = 1.0f;
+    unsigned int abs_b = b < 0 ? -1 * (static_cast<unsigned int>(b)) : static_cast<unsigned int>(b);
+    while (abs_b) {
+        if (abs_b % 2) res *= a;
+        a *= a;
+        abs_b /= 2;
+    }
+    // Take the reciprocal for negative exponents
+    if (b < 0.0f) {
+        return 1.0f / res;  
+    } else {
+        return res;
+    }
+}
+
 inline float FastSign(const float a) {
   // Microsoft compiler does not have a builtin for copysign and emits a
   // library call which is too expensive for hot paths.

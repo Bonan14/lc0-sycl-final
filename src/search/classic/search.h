@@ -44,13 +44,14 @@
 #include "syzygy/syzygy.h"
 #include "utils/logging.h"
 #include "utils/mutex.h"
+#include "utils/exception.h"
 
 namespace lczero {
 namespace classic {
 
 class Search {
  public:
-  Search(const NodeTree& tree, Backend* network,
+  Search(const NodeTree& tree, Backend* backend,
          std::unique_ptr<UciResponder> uci_responder,
          const MoveList& searchmoves,
          std::chrono::steady_clock::time_point start_time,
@@ -60,10 +61,10 @@ class Search {
   ~Search();
 
   // Starts worker threads and returns immediately.
-  void StartThreads(size_t how_many);
+  void StartThreads(unsigned int how_many);
 
   // Starts search with k threads and wait until it finishes.
-  void RunBlocking(size_t threads);
+  void RunBlocking(unsigned int threads);
 
   // Stops search. At the end bestmove will be returned. The function is not
   // blocking, so it returns before search is actually done.
@@ -169,7 +170,7 @@ class Search {
   const PositionHistory& played_history_;
 
   Backend* const backend_;
-  BackendAttributes backend_attributes_;
+  BackendAttributes backend_attributes_ = backend_->GetAttributes();
   const SearchParams params_;
   const MoveList searchmoves_;
   const std::chrono::steady_clock::time_point start_time_;
@@ -217,17 +218,25 @@ class SearchWorker {
         params_(params),
         moves_left_support_(search_->backend_attributes_.has_mlh) {
     task_workers_ = params.GetTaskWorkersPerSearchWorker();
+    unsigned int thread_count = search_->backend_attributes_.suggested_num_search_threads;
+    unsigned int working_threads = std::max(thread_count, 1U);
+    unsigned int hw_concurrency = std::thread::hardware_concurrency();
     if (task_workers_ < 0) {
-      if (search_->backend_attributes_.runs_on_cpu) {
-        task_workers_ = 0;
-      } else {
-        int working_threads = std::max(
-            search_->thread_count_.load(std::memory_order_acquire) - 1, 1);
-        task_workers_ = std::min(
-            std::thread::hardware_concurrency() / working_threads - 1, 4U);
-      }
+       if (search_->backend_attributes_.runs_on_cpu) {
+          task_workers_ = 0;
+        } else {
+              if (working_threads > 1 && hw_concurrency > 1) {
+                task_workers_ = std::min(hw_concurrency / working_threads - 1U, 4U);
+              } else {
+                   task_workers_ = 1;
+            }
+        }
     }
-    for (int i = 0; i < task_workers_; i++) {
+    CERR << "[ Task-Workers: "
+    << task_workers_ << " " << " "
+    << " Task-Workers End ]" << "\n";
+        
+    for (int i = 0; i <= task_workers_; i++) {
       task_workspaces_.emplace_back();
       task_threads_.emplace_back([this, i]() { this->RunTasks(i); });
     }

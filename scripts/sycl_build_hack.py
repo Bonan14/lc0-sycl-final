@@ -14,9 +14,9 @@ link_flag = False
 for line in lines:
   # Replace xilink with icx -fsycl as the linker.
   if not link_flag:
-    link_flag = 'icx.exe' in line
+    link_flag = 'xilink' in line
   if link_flag:
-    line = line.replace('icx.exe', 'icx')
+    line = line.replace('xilink', 'icx')
     line = line.replace('/MACHINE:x64', '-fsycl')
     line = line.replace('/OUT:', '-o ')
     line = line.replace('/SUBSYSTEM:CONSOLE', '')

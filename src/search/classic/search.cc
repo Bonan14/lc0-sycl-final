@@ -43,6 +43,7 @@
 #include "utils/fastmath.h"
 #include "utils/random.h"
 #include "utils/spinhelper.h"
+#include "utils/exception.h"
 
 namespace lczero {
 namespace classic {
@@ -163,7 +164,7 @@ Search::Search(const NodeTree& tree, Backend* backend,
       syzygy_tb_(syzygy_tb),
       played_history_(tree.GetPositionHistory()),
       backend_(backend),
-      backend_attributes_(backend->GetAttributes()),
+      //backend_attributes_(backend->GetAttributes()),
       params_(options),
       searchmoves_(searchmoves),
       start_time_(start_time),
@@ -885,7 +886,7 @@ EdgeAndNode Search::GetBestRootChildWithTemperature(float temperature) const {
       continue;
     }
     if (edge.GetQ(fpu, draw_score) < min_eval) continue;
-    sum += std::pow(
+    sum += Fast_POW2(
         std::max(0.0f,
                  (max_n <= 0.0f
                       ? edge.GetP()
@@ -913,19 +914,24 @@ EdgeAndNode Search::GetBestRootChildWithTemperature(float temperature) const {
   return {};
 }
 
-void Search::StartThreads(size_t how_many) {
+/*void Search::StartThreads(unsigned int how_many) {
   Mutex::Lock lock(threads_mutex_);
   if (how_many == 0 && threads_.size() == 0) {
     how_many = backend_attributes_.suggested_num_search_threads +
                !backend_attributes_.runs_on_cpu;
   }
+  if (how_many == 0) {
+      how_many = 3U;
+  } 
+  
   thread_count_.store(how_many, std::memory_order_release);
+ 
   // First thread is a watchdog thread.
   if (threads_.size() == 0) {
     threads_.emplace_back([this]() { WatchdogThread(); });
   }
   // Start working threads.
-  for (size_t i = 0; i < how_many; i++) {
+  for (unsigned int i = 0; i < how_many; i++) {
     threads_.emplace_back([this]() {
       SearchWorker worker(this, params_);
       worker.RunBlocking();
@@ -936,9 +942,50 @@ void Search::StartThreads(size_t how_many) {
                  std::chrono::steady_clock::now() - start_time_)
                  .count()
           << "ms already passed.";
+}*/
+
+void Search::StartThreads(unsigned int how_many) {
+    Mutex::Lock lock(threads_mutex_);
+    CERR << "[Search] Before thread count calculation - suggested_num_search_threads: " 
+         << backend_attributes_.suggested_num_search_threads 
+         << " runs_on_cpu: " << backend_attributes_.runs_on_cpu << "\n";
+
+    if (how_many == 0 && threads_.size() == 0) {
+        how_many = std::max(backend_attributes_.suggested_num_search_threads, 1) +
+                   (!backend_attributes_.runs_on_cpu ? 1 : 0);
+        CERR << "[Search] Calculated how_many: " << how_many << "\n";
+        // Sync backend_attributes_ with the calculated value
+        backend_attributes_.suggested_num_search_threads = std::max(how_many, 1U);
+    }
+    if (how_many == 0) {
+        how_many = 4U;
+        CERR << "[Search] Defaulted how_many to: " << how_many << "\n";
+        backend_attributes_.suggested_num_search_threads = how_many; // Ensure consistency
+    }
+
+    thread_count_.store(how_many, std::memory_order_release);
+    CERR << "[Search] Final thread count: " << how_many << "\n";
+
+    // First thread is a watchdog thread.
+    if (threads_.size() == 0) {
+        threads_.emplace_back([this]() { WatchdogThread(); });
+    }
+    // Start working threads.
+    for (unsigned int i = 0; i < how_many; i++) {
+        CERR << "[Search] Starting SearchWorker for thread " << i << "\n";
+        threads_.emplace_back([this]() {
+            SearchWorker worker(this, params_);
+            worker.RunBlocking();
+        });
+    }
+    LOGFILE << "Search started. "
+            << std::chrono::duration_cast<std::chrono::milliseconds>(
+                   std::chrono::steady_clock::now() - start_time_)
+                   .count()
+            << "ms already passed.";
 }
 
-void Search::RunBlocking(size_t threads) {
+void Search::RunBlocking(unsigned int threads) {
   StartThreads(threads);
   Wait();
 }
@@ -1296,7 +1343,7 @@ int CalculateCollisionsLeft(int64_t nodes, const SearchParams& params) {
     return 1;
   }
   return Mix(params.GetMaxCollisionVisits(), 1,
-             std::pow((static_cast<float>(nodes) -
+             Fast_POW((static_cast<float>(nodes) -
                        params.GetMaxCollisionVisitsScalingStart()) /
                           (params.GetMaxCollisionVisitsScalingEnd() -
                            params.GetMaxCollisionVisitsScalingStart()),
@@ -1322,13 +1369,17 @@ void SearchWorker::GatherMinibatch() {
   // Number of nodes processed out of order.
   number_out_of_order_ = 0;
 
-  int thread_count = search_->thread_count_.load(std::memory_order_acquire);
-
+  int thread_count = 0;
+  int backend_waiting = 0;
   // Gather nodes to process in the current batch.
   // If we had too many nodes out of order, also interrupt the iteration so
   // that search can exit.
   while (minibatch_size < target_minibatch_size_ &&
          number_out_of_order_ < max_out_of_order_) {
+             
+    backend_waiting = search_->backend_waiting_counter_.load(
+                       std::memory_order_relaxed);
+    thread_count = search_->thread_count_.load(std::memory_order_acquire);
     // If there's something to process without touching slow neural net, do it.
     if (minibatch_size > 0 && computation_->UsedBatchSize() == 0) return;
 
@@ -1341,8 +1392,7 @@ void SearchWorker::GatherMinibatch() {
     if (thread_count > 1 && minibatch_size > 0 &&
         static_cast<int>(computation_->UsedBatchSize()) >
             params_.GetIdlingMinimumWork() &&
-        thread_count - search_->backend_waiting_counter_.load(
-                           std::memory_order_relaxed) >
+        thread_count - backend_waiting >
             params_.GetThreadIdlingThreshold()) {
       return;
     }
@@ -1369,8 +1419,7 @@ void SearchWorker::GatherMinibatch() {
     if (task_workers_ > 0 &&
         non_collisions >= params_.GetMinimumWorkSizeForProcessing()) {
       const int num_tasks = std::clamp(
-          non_collisions / params_.GetMinimumWorkPerTaskForProcessing(), 2,
-          task_workers_ + 1);
+          non_collisions / params_.GetMinimumWorkPerTaskForProcessing(), 2, 1);
       // Round down, left overs can go to main thread so it waits less.
       int per_worker = non_collisions / num_tasks;
       needs_wait = true;

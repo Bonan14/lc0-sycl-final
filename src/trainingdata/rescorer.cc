@@ -32,6 +32,8 @@
 
 #include "gtb-probe.h"
 #include "neural/decoder.h"
+#include "neural/factory.h"
+#include "neural/loader.h"
 #include "syzygy/syzygy.h"
 #include "trainingdata/reader.h"
 #include "utils/filesystem.h"

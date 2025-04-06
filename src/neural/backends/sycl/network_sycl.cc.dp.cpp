@@ -203,26 +203,57 @@ class SyclNetwork : public Network {
 
     
 
-    int total_gpus = dpct::dev_mgr::instance().device_count();
+    std::string device_plat_ = options.GetOrDefault<std::string>("platform", "OpenCL");
+    // Convert device_plat_ to lowercase
+    std::string device_plat_lower = to_lower(device_plat_);
 
-    if (gpu_id_ >= total_gpus)
-      throw Exception("Invalid GPU Id: " + std::to_string(gpu_id_));
+    // Get all the available platforms
+    auto platforms = sycl::platform::get_platforms();
 
+    // Iterate over all platforms and add devices.
+    for (const auto& platform : platforms) {
+        // Get the platform name and convert it to lowercase
+        std::string platform_name_lower = to_lower(platform.get_info<sycl::info::platform::name>());
+        if (platform_name_lower.find(device_plat_lower) != std::string::npos) {
+            auto platform_devices = platform.get_devices();
+            devices.insert(devices.end(), platform_devices.begin(), platform_devices.end());
+        }
+    }
     
-    //dpct::dev_mgr::instance().get_device(gpu_id_).get_device_info(deviceProp);
+    // Count the GPU's.
+    for (const auto& device : devices) {
+        if (device.is_gpu()) { total_gpus_++; }
+    }
 
-    sycl_queue_ = new sycl::queue{dpct::dev_mgr::instance().get_device(gpu_id_), [] (sycl::exception_list exceptions) {
-
+    if (gpu_id_ >= (int)devices.size())
+      throw Exception("Invalid GPU Id: " + std::to_string(gpu_id_));
+  
+      // Get the sycl device.
+    device_ = devices[gpu_id_];
+      
+    // Get the number of compute units(execution units).
+    compute_units_ = device_.get_info<sycl::info::device::max_compute_units>();
+    
+    // Get context.
+    sycl::context context{device_};
+  
+    
+    auto exceptions_handler = [&] (sycl::exception_list exceptions) {
         for (std::exception_ptr const& e : exceptions) {
-                    try {
-                          std::rethrow_exception(e);
-                        } catch(sycl::exception const& e) {
-                    
-				std::cout << "Caught asynchronous SYCL exception during GEMM:\n" << e.what() << std::endl;
-                        }
-             
-                 }
-    },  sycl::property_list{sycl::property::queue::in_order{}}};
+           try {
+               std::rethrow_exception(e);
+            } catch(sycl::exception const& e) {
+				std::cout 
+                << "Caught asynchronous SYCL exception during GEMM:\n" 
+                << e.what() 
+                << std::endl;
+                std::terminate();
+            }
+        }
+    };
+    
+    sycl_queue_ = new sycl::queue{context, device_, 
+              exceptions_handler, sycl::property_list{sycl::property::queue::in_order{}} };
 
     showDeviceInfo(*sycl_queue_);
 
@@ -914,6 +945,29 @@ class SyclNetwork : public Network {
   const NetworkCapabilities& GetCapabilities() const override {
     return capabilities_;
   }
+  
+  // A vector to store sycl devices.
+  std::vector<sycl::device> devices;
+  
+  // Check if device is the cpu for thread handling.
+  bool IsCpu() const override { return device_.is_cpu(); }
+  
+  // 2 threads for cpu and 1 + total_gpu's for the multiple gpu's. 
+  int GetThreads() const override { return device_.is_cpu() ? 1 : 2; /*int(1 + total_gpus_)*/ }
+  
+  int GetMiniBatchSize() const override {
+     if (device_.is_cpu()) { return 47; }
+    // Simple heuristic that seems to work for a wide range of GPUs.
+    return 2 * compute_units_;
+  }
+  
+  // Function to convert a string to lowercase using std::tolower
+  std::string to_lower(const std::string& str) {
+        std::string lower_str = str;
+        std::transform(lower_str.begin(), lower_str.end(), lower_str.begin(),
+                   [](unsigned char c) { return std::tolower(c); });
+        return lower_str;
+  }
 
   std::unique_ptr<NetworkComputation> NewComputation() override {
     // Set correct gpu id for this computation (as it might have been called
@@ -952,6 +1006,8 @@ class SyclNetwork : public Network {
   int gpu_id_;
   int l2_cache_size_;
   int max_batch_size_;
+  int compute_units_;
+  int total_gpus_;
   bool wdl_;
   bool moves_left_;
   bool use_res_block_winograd_fuse_opt_;  // fuse operations inside the residual
@@ -963,6 +1019,7 @@ class SyclNetwork : public Network {
   // by allocating more memory).
   mutable std::mutex lock_;
   sycl::queue * sycl_queue_;
+  sycl::device device_;
 
 
   int numBlocks_;
@@ -996,15 +1053,37 @@ class SyclNetwork : public Network {
   mutable std::mutex inputs_outputs_lock_;
   std::list<std::unique_ptr<InputsOutputs>> free_inputs_outputs_;
 
-  void showDeviceInfo(const sycl::queue & mqueue) const {
-    CERR << "PLATFORM: " << mqueue.get_device().get_platform().get_info<sycl::info::platform::name>();
-    CERR << "GPU: " << mqueue.get_device().get_info<sycl::info::device::name>();
-    CERR << "GPU memory: " << mqueue.get_device().get_info<sycl::info::device::max_mem_alloc_size>();
-    CERR << "GPU clock frequency: " << mqueue.get_device().get_info<sycl::info::device::max_clock_frequency>(); 
-    CERR << "L2 cache capacity: " << mqueue.get_device().get_info<sycl::info::device::local_mem_size>();
-    CERR << "Global memory Size: " << mqueue.get_device().get_info<sycl::info::device::global_mem_size>();
-
-  } 
+  void showDeviceInfo(const sycl::queue &mqueue) const {
+    // Platform name
+    std::cerr << "PLATFORM: " 
+              << mqueue.get_device().get_platform().get_info<sycl::info::platform::name>() 
+              << std::endl;
+    // Device name
+    std::string device_type = mqueue.get_device().is_gpu() ? "GPU" : "CPU";
+    std::cerr << device_type << ": " 
+              << mqueue.get_device().get_info<sycl::info::device::name>() 
+              << std::endl;
+    // Device memory (max_mem_alloc_size) in MB
+    std::cerr << device_type << ": " 
+              << mqueue.get_device().get_info<sycl::info::device::max_mem_alloc_size>() / (1024 * 1024) 
+              << " MB" 
+              << std::endl;
+    // Device clock frequency (max_clock_frequency)
+    std::cerr << device_type << " clock frequency: " 
+              << mqueue.get_device().get_info<sycl::info::device::max_clock_frequency>() 
+              << " MHz" 
+              << std::endl;
+    // L2 cache capacity (local_mem_size) in MB
+    std::cerr << "L2 cache capacity: " 
+              << mqueue.get_device().get_info<sycl::info::device::local_mem_size>() / (1024) 
+              << " KB" 
+              << std::endl;
+    // Global memory size (global_mem_size) in MB
+    std::cerr << "Global memory size: " 
+              << mqueue.get_device().get_info<sycl::info::device::global_mem_size>() / (1024 * 1024) 
+              << " MB" 
+              << std::endl;          
+    }
 };
 
 template <typename DataType>
