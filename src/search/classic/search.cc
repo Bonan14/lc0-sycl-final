@@ -549,9 +549,9 @@ std::vector<std::string> Search::GetVerboseStats(Node* node) const {
     std::ostringstream oss;
     oss << std::left;
     // TODO: should this be displaying transformed index?
-    print_head(&oss, edge.GetMove(is_black_to_move).as_string(),
-               edge.GetMove().as_nn_index(0), edge.GetN(), edge.GetNInFlight(),
-               edge.GetP());
+    print_head(&oss, edge.GetMove(is_black_to_move).ToString(true),
+               MoveToNNIndex(edge.GetMove(), 0), edge.GetN(),
+               edge.GetNInFlight(), edge.GetP());
     print_stats(&oss, edge.node());
     print(&oss, "(U: ", edge.GetU(U_coeff), ") ", 6, 5);
     print(&oss, "(S: ", Q + edge.GetU(U_coeff) + M, ") ", 8, 5);
@@ -590,7 +590,7 @@ void Search::SendMovesStats() const REQUIRES(counters_mutex_) {
       continue;
     }
     if (edge.HasNode()) {
-      LOGFILE << "--- Opponent moves after: " << final_bestmove_.as_string();
+      LOGFILE << "--- Opponent moves after: " << final_bestmove_.ToString(true);
       for (const auto& line : GetVerboseStats(edge.node())) {
         LOGFILE << line;
       }
@@ -600,8 +600,12 @@ void Search::SendMovesStats() const REQUIRES(counters_mutex_) {
 
 PositionHistory Search::GetPositionHistoryAtNode(const Node* node) const {
   PositionHistory history(played_history_);
+  std::vector<Move> rmoves;
   for (const Node* n = node; n != root_node_; n = n->GetParent()) {
-    history.Append(n->GetOwnEdge()->GetMove());
+    rmoves.push_back(n->GetOwnEdge()->GetMove());
+  }
+  for (auto it = rmoves.rbegin(); it != rmoves.rend(); it++) {
+    history.Append(*it);
   }
   return history;
 }
@@ -2027,8 +2031,6 @@ void SearchWorker::ExtendNode(Node* node, int depth,
 bool SearchWorker::AddNodeToComputation(Node* node) {
   std::vector<Move> moves;
   if (node && node->HasChildren()) {
-    // Legal moves are known, use them.
-    assert(false);  // Why would we ever be here?
     moves.reserve(node->GetNumEdges());
     for (const auto& edge : node->Edges()) moves.emplace_back(edge.GetMove());
   } else {

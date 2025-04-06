@@ -30,6 +30,7 @@
 #include <vector>
 
 #include "engine_loop.h"
+#include "neural/memcache.h"
 #include "search/search.h"
 
 namespace lczero {
@@ -49,12 +50,13 @@ class Engine : public EngineControllerBase {
   void Stop() override;
 
  private:
-  void EnsureBackendCreated();
+  void UpdateBackendConfig();
   void EnsureSearchStopped();
 
   const OptionsDict& options_;
   std::unique_ptr<SearchBase> search_;
-  std::unique_ptr<Backend> backend_;
+  std::string backend_name_;
+  std::unique_ptr<CachingBackend> backend_;
   bool search_initialized_ = false;
 };
 

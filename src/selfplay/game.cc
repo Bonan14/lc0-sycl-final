@@ -120,6 +120,7 @@ SelfPlayGame::SelfPlayGame(PlayerOptions white, PlayerOptions black,
                                       exit_prob_next * (positions / 2)))) {
       break;
     }
+    if (tree_[0]->IsBlackToMove()) m.Flip();
     tree_[0]->MakeMove(m);
     if (tree_[0] != tree_[1]) tree_[1]->MakeMove(m);
     ply++;
@@ -167,12 +168,6 @@ void SelfPlayGame::Play(int white_threads, int black_threads, bool training,
       std::unique_ptr<UciResponder> responder =
           std::make_unique<CallbackUciResponder>(
               options_[idx].best_move_callback, options_[idx].info_callback);
-
-      if (!chess960_) {
-        // Remap FRC castling to legacy castling.
-        responder = std::make_unique<Chess960Transformer>(
-            std::move(responder), tree_[idx]->HeadPosition().GetBoard());
-      }
 
       search_ = std::make_unique<classic::Search>(
           *tree_[idx], options_[idx].backend, std::move(responder),
@@ -261,9 +256,7 @@ void SelfPlayGame::Play(int white_threads, int black_threads, bool training,
       }
       PositionHistory history_copy = tree_[idx]->GetPositionHistory();
       Move move_for_history = move;
-      if (tree_[idx]->IsBlackToMove()) {
-        move_for_history.Mirror();
-      }
+      if (tree_[idx]->IsBlackToMove()) move_for_history.Flip();
       history_copy.Append(move_for_history);
       // Ensure not to discard games that are already decided.
       if (history_copy.ComputeGameResult() == GameResult::UNDECIDED) {
@@ -299,12 +292,14 @@ void SelfPlayGame::Play(int white_threads, int black_threads, bool training,
       training_data_.Add(tree_[idx]->GetCurrentHead(),
                          tree_[idx]->GetPositionHistory(), best_eval,
                          played_eval, best_is_proof, best_move, move,
-                         legal_moves, nneval);
+                         legal_moves, nneval,
+                         search_->GetParams().GetPolicySoftmaxTemp());
     }
     // Must reset the search before mutating the tree.
     search_.reset();
 
     // Add best move to the tree.
+    if (tree_[0]->IsBlackToMove()) move.Flip();
     tree_[0]->MakeMove(move);
     if (tree_[0] != tree_[1]) tree_[1]->MakeMove(move);
     blacks_move = !blacks_move;
@@ -322,10 +317,9 @@ std::vector<Move> SelfPlayGame::GetMoves() const {
   while (!moves.empty()) {
     Move move = moves.back();
     moves.pop_back();
-    if (!chess960_) move = pos.GetBoard().GetLegacyMove(move);
     pos = Position(pos, move);
     // Position already flipped, therefore flip the move if white to move.
-    if (!pos.IsBlackToMove()) move.Mirror();
+    if (!pos.IsBlackToMove()) move.Flip();
     result.push_back(move);
   }
   return result;

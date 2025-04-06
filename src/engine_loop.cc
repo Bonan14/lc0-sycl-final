@@ -38,21 +38,21 @@ const OptionId kLogFileId{"logfile", "LogFile",
                           'l'};
 const OptionId kPreload{"preload", "",
                         "Initialize backend and load net on engine startup."};
+
 }  // namespace
 
 EngineLoop::EngineLoop(
-    std::unique_ptr<OptionsParser> options,
+    StringUciResponder* uci_responder, std::unique_ptr<OptionsParser> options,
     std::function<std::unique_ptr<EngineControllerBase>(
         UciResponder& uci_responder, const OptionsDict& options)>
         engine_factory)
-    : uci_responder_(std::make_unique<CallbackUciResponder>(
-          [&](auto&& arg) { return SendBestMove(arg); },
-          [&](auto&& arg) { return SendInfo(arg); })),
+    : UciLoop(uci_responder),
       options_(std::move(options)),
       engine_(engine_factory(*uci_responder_, options_->GetOptionsDict())) {
   options_->Add<StringOption>(kLogFileId);
   options_->Add<BoolOption>(kPreload) = false;
   SharedBackendParams::Populate(options_.get());
+  uci_responder_->PopulateParams(options_.get());
 }
 
 void EngineLoop::RunLoop() {
@@ -64,16 +64,16 @@ void EngineLoop::RunLoop() {
 }
 
 void EngineLoop::CmdUci() {
-  SendId();
+  uci_responder_->SendId();
   for (const auto& option : options_->ListOptionsUci()) {
-    SendResponse(option);
+    uci_responder_->SendRawResponse(option);
   }
-  SendResponse("uciok");
+  uci_responder_->SendRawResponse("uciok");
 }
 
 void EngineLoop::CmdIsReady() {
   engine_->EnsureReady();
-  SendResponse("readyok");
+  uci_responder_->SendRawResponse("readyok");
 }
 
 void EngineLoop::CmdSetOption(const std::string& name, const std::string& value,

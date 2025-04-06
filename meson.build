@@ -157,7 +157,6 @@ files += gen_proto_src.process('src/neural/xla/hlo.proto',
 ## Main files
 #############################################################################
 common_files += [
-  'src/chess/bitboard.cc',
   'src/chess/board.cc',
   'src/chess/gamestate.cc',
   'src/chess/position.cc',
@@ -749,8 +748,12 @@ endif
 
 if get_option('rescorer')
   deps += subproject('gaviotatb').get_variable('gaviotatb_dep')
+  common_files += [
+  'src/neural/factory.cc',
+  'src/neural/loader.cc', 
+  ]
   executable('rescorer', 'src/rescorer_main.cc',
-       [common_files, 'src/trainingdata/rescoreloop.cc'],
+       [common_files, 'src/trainingdata/rescorer.cc'],
        include_directories: includes, dependencies: deps, install: true)
 endif
 
