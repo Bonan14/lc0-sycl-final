@@ -63,6 +63,8 @@ const OptionId kValueOnly{
     "the worst for the opponent."};
 const OptionId kClearTree{"", "ClearTree",
                           "Clear the tree before the next search."};
+const OptionId kPreload{"preload", "",
+                        "Initialize backend and load net on engine startup."};
 
 MoveList StringsToMovelist(const std::vector<std::string>& moves,
                            const ChessBoard& board) {
@@ -82,11 +84,10 @@ MoveList StringsToMovelist(const std::vector<std::string>& moves,
 
 }  // namespace
 
-EngineClassic::EngineClassic(UciResponder& uci_responder,
-                             const OptionsDict& options)
-    : options_(options),
-      uci_responder_(&uci_responder),
-      current_position_{ChessBoard::kStartposFen, {}} {}
+EngineClassic::EngineClassic(const OptionsDict& options)
+    : options_(options), current_position_{ChessBoard::kStartposFen, {}} {
+  if (options_.Get<bool>(kPreload)) UpdateFromUciOptions();
+}
 
 void EngineClassic::PopulateOptions(OptionsParser* options) {
   using namespace std::placeholders;
@@ -118,6 +119,8 @@ void EngineClassic::PopulateOptions(OptionsParser* options) {
   options->Add<BoolOption>(kValueOnly) = false;
   options->Add<ButtonOption>(kClearTree);
   options->HideOption(kClearTree);
+
+  options->Add<BoolOption>(kPreload) = false;
 }
 
 void EngineClassic::ResetMoveTimer() {
@@ -304,7 +307,7 @@ void EngineClassic::Go(const GoParams& params) {
   go_params_ = params;
 
   std::unique_ptr<UciResponder> responder =
-      std::make_unique<NonOwningUciRespondForwarder>(uci_responder_);
+      std::make_unique<NonOwningUciRespondForwarder>(&uci_forwarder_);
 
   // Setting up current position, now that it's known whether it's ponder or
   // not.
@@ -365,6 +368,14 @@ void EngineClassic::PonderHit() {
 
 void EngineClassic::Stop() {
   if (search_) search_->Stop();
+}
+
+void EngineClassic::RegisterUciResponder(UciResponder* responder) {
+  uci_forwarder_.Register(responder);
+}
+
+void EngineClassic::UnregisterUciResponder(UciResponder* responder) {
+  uci_forwarder_.Unregister(responder);
 }
 
 }  // namespace lczero
