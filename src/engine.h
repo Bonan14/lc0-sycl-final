@@ -37,10 +37,10 @@ namespace lczero {
 
 class Engine : public EngineControllerBase {
  public:
-  Engine(std::unique_ptr<SearchBase>, const OptionsDict&);
-  ~Engine() override;
+  Engine(const SearchFactory&, const OptionsDict&);
 
- private:
+  static void PopulateOptions(OptionsParser*);
+
   void EnsureReady() override {};
   void NewGame() override;
   void SetPosition(const std::string& fen,
@@ -49,10 +49,14 @@ class Engine : public EngineControllerBase {
   void PonderHit() override {}
   void Stop() override;
 
+  void RegisterUciResponder(UciResponder*) override;
+  void UnregisterUciResponder(UciResponder*) override;
+
  private:
   void UpdateBackendConfig();
   void EnsureSearchStopped();
 
+  UciResponderForwarder uci_forwarder_;
   const OptionsDict& options_;
   std::unique_ptr<SearchBase> search_;
   std::string backend_name_;
